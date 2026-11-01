@@ -19,6 +19,41 @@ https://github.com/user-attachments/assets/26db8b21-43b5-44ef-8eb0-d703c53bd700
 Нативная экспериментальная Windows-версия на PowerShell и Virtual Display Driver: [установка, запуск, тесты и ограничения](README-Windows.md).
 При демонстрации «Весь экран» необходимо выбрать именно VDD-монитор. Полная изоляция уровня Xephyr не гарантируется; Windows 10 использует явно выбранный режим MonitorOnly.
 
+### Установка и запуск в Windows
+
+Нужны Windows 10 1809+/11 **x64**, Google Chrome, PowerShell 5.1+ и winget (App Installer). Откройте обычный PowerShell от своего пользователя:
+
+```powershell
+git clone https://github.com/itisabyl/oes-babl.git
+cd oes-babl
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Установка VDD и Visual C++ может вызвать запрос прав администратора. Если winget установил только **VDD Control**, откройте его и выполните установку самого драйвера. Создайте один виртуальный монитор, оставьте физический экран основным и выберите режим **«Расширить эти экраны»**. Затем повторите `install.ps1`. Перезагрузите Windows, только если установщик этого потребует.
+
+Запуск после установки (работает без обновления PATH текущего терминала):
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\oes-babl-win\oes-babl-win.ps1"
+```
+
+Откроется Chrome на VDD и окно предпросмотра на физическом экране. Кликните изображение, чтобы работать с Chrome; закрытие предпросмотра завершает сеанс. Если Chrome уже открыт, сначала сохраните работу: лаунчер запросит подтверждение его закрытия. Для Google Meet выбирайте **«Весь экран» → только VDD-монитор**.
+
+Для Windows 10 и сборок Windows 11 без совместимой автоматизации рабочих столов используйте явно заданный режим:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\oes-babl-win\oes-babl-win.ps1" -DesktopMode MonitorOnly
+```
+
+Другой сайт, размер и справка:
+
+```powershell
+& "$env:LOCALAPPDATA\oes-babl-win\oes-babl-win.ps1" -Url https://example.com -Size 1920x1080
+& "$env:LOCALAPPDATA\oes-babl-win\oes-babl-win.ps1" -Help
+```
+
+Каждый запуск создаёт новый профиль Chrome; существующие входы и cookies не копируются. Все параметры, диагностика и восстановление описаны в [README-Windows.md](README-Windows.md).
+
 ## Требования Linux-версии
 
 - Linux, Bash и Google Chrome (`google-chrome-stable` или `google-chrome`).
