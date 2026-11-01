@@ -61,7 +61,7 @@ namespace Oes {
         delegate bool EnumCallback(IntPtr hwnd, IntPtr param);
         [DllImport("user32.dll")] static extern bool EnumWindows(EnumCallback callback, IntPtr param);
         [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
-        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
         [DllImport("user32.dll", EntryPoint="IsWindow")] public static extern bool WindowExists(IntPtr hwnd);
         [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out Rect bounds);
         [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd, StringBuilder name, int size);
@@ -84,14 +84,8 @@ namespace Oes {
                 DisplayDevice d = new DisplayDevice(); d.cb = Marshal.SizeOf(typeof(DisplayDevice));
                 if (!EnumDisplayDevices(null,i,ref d,0)) break;
                 if ((d.Flags & 8) != 0) continue;
-                string identity = (d.Id + " " + d.Description).ToLowerInvariant();
-                bool vdd = identity.Contains("mttvdd") || d.Description == "Virtual Display Driver";
-                // Привязка к адаптеру / never identify VDD merely by !Primary.
-                for (uint j=0;;j++) {
-                    DisplayDevice monitor = new DisplayDevice(); monitor.cb = Marshal.SizeOf(typeof(DisplayDevice));
-                    if (!EnumDisplayDevices(d.Name,j,ref monitor,0)) break;
-                    if ((monitor.Id ?? "").IndexOf("MTT1337", StringComparison.OrdinalIgnoreCase)>=0) vdd=true;
-                }
+                // EDID клона может находиться под физическим GPU / identify the adapter, not its cloned monitor.
+                bool vdd = IsVddAdapter(d.Id,d.Description);
                 bool active=(d.Flags & 1)!=0;
                 Mode mode = new Mode();
                 if (active) mode=ReadMode(d.Name,-1);
@@ -99,6 +93,10 @@ namespace Oes {
                     Active=active, Primary=(d.Flags & 4)!=0, IsVdd=vdd, Mode=mode});
             }
             return result.ToArray();
+        }
+        public static bool IsVddAdapter(string id,string description) {
+            return (id ?? "").IndexOf("mttvdd",StringComparison.OrdinalIgnoreCase)>=0 ||
+                String.Equals(description,"Virtual Display Driver",StringComparison.OrdinalIgnoreCase);
         }
         public static Mode FindMode(string name, int width, int height) {
             for (int i=0;;i++) {
@@ -111,7 +109,8 @@ namespace Oes {
         }
         public static void ApplyMode(string name, Mode mode, bool persist) {
             int result=ChangeDisplaySettingsEx(name,ref mode,IntPtr.Zero,2,IntPtr.Zero); // CDS_TEST
-            if (result!=0) throw new InvalidOperationException("Display mode test failed: " + result);
+            if (result!=0) throw new InvalidOperationException("Display mode test failed: " + result +
+                ". Activate VDD with Extend these displays in Windows Settings and retry.");
             result=ChangeDisplaySettingsEx(name,ref mode,IntPtr.Zero,persist ? 1u : 0u,IntPtr.Zero);
             if (result!=0) throw new InvalidOperationException("Display change failed: " + result +
                 (result==1 ? " (restart required)" : ""));
@@ -147,6 +146,12 @@ namespace Oes {
         }
         public static void CloseWindow(IntPtr hwnd) {
             if (!PostMessage(hwnd,0x10,IntPtr.Zero,IntPtr.Zero) && WindowExists(hwnd)) throw new Win32Exception();
+        }
+        public static void ShowPreview(IntPtr hwnd) {
+            // STARTUPINFO can hide the first Form.Show when the PowerShell console is hidden.
+            // Повторный ShowWindow показывает именно форму, не консоль.
+            ShowWindow(hwnd,5);
+            if (!IsWindowVisible(hwnd)) throw new InvalidOperationException("The preview window could not be shown.");
         }
         static Input Mouse(int x,int y,uint flags,uint data) {
             return new Input {Type=0,Mouse=new MouseInput {X=x,Y=y,Flags=flags,Data=data}};
@@ -250,10 +255,11 @@ namespace Oes {
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int OneArg(int n);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int TwoArgs(int n,int fallback);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate Guid GetId(int n);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate Guid GetWindowId(IntPtr hwnd);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int GetIndex(Guid id);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int MoveWindow(IntPtr hwnd,int n);
         IntPtr module;
-        NoArg current,count,create; OneArg go; TwoArgs remove; GetId id; GetIndex index; MoveWindow move;
+        NoArg current,count,create; OneArg go; TwoArgs remove; GetId id; GetIndex index; MoveWindow move; GetWindowId windowId;
         Delegate Bind(string name,Type type) {
             IntPtr address=GetProcAddress(module,name);
             if (address==IntPtr.Zero) throw new InvalidOperationException("VDA is missing export: "+name);
@@ -272,6 +278,7 @@ namespace Oes {
                 id=(GetId)Bind("GetDesktopIdByNumber",typeof(GetId));
                 index=(GetIndex)Bind("GetDesktopNumberById",typeof(GetIndex));
                 move=(MoveWindow)Bind("MoveWindowToDesktopNumber",typeof(MoveWindow));
+                windowId=(GetWindowId)Bind("GetWindowDesktopId",typeof(GetWindowId));
                 Check(current()); Check(count());
             } catch { Dispose(); throw; }
         }
@@ -280,6 +287,18 @@ namespace Oes {
             return result;
         }
         public Guid Current() { return Id(Check(current())); }
+        public Guid WindowDesktop(IntPtr hwnd) { return windowId(hwnd); }
+        public void AttachPreview(IntPtr hwnd,Guid desktop) {
+            // Explorer may not have registered the new ApplicationView yet.
+            int target=Check(index(desktop));
+            for (int i=0;i<40;i++) {
+                if (!Native.WindowExists(hwnd)) throw new InvalidOperationException("The preview window closed before desktop assignment.");
+                if (windowId(hwnd)==desktop) return;
+                move(hwnd,target);
+                System.Threading.Thread.Sleep(50);
+            }
+            if (windowId(hwnd)!=desktop) throw new InvalidOperationException("Could not place the preview on the Chrome session desktop.");
+        }
         public Guid Id(int number) {
             Guid value=id(number);
             if (value==Guid.Empty) throw new InvalidOperationException("VDA returned an empty desktop ID.");

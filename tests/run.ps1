@@ -14,11 +14,29 @@ function Assert-Throws([scriptblock]$Action, [string]$Pattern) {
     try { & $Action | Out-Null } catch { $caught = $_.Exception.Message }
     Assert ($null -ne $caught -and $caught -match $Pattern) "Expected error '$Pattern', got '$caught'."
 }
-function Invoke-Child([string]$Arguments) {
+function Invoke-Child([string]$Arguments, [switch]$HiddenWindow) {
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $start.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass ' + $Arguments
     $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    # Do not inherit PowerShell 7 modules when testing a Windows PowerShell child.
+    $start.EnvironmentVariables['PSModulePath'] = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules') + ';' + (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules')
+    if ($HiddenWindow) {
+        # .NET Framework ignores WindowStyle with UseShellExecute=false.
+        # Start-Process sets the actual STARTUPINFO hidden flag used by background launches.
+        $stdoutPath = Join-Path $scratch 'preview-stdout.txt'
+        $stderrPath = Join-Path $scratch 'preview-stderr.txt'
+        $modulePath = $env:PSModulePath
+        try {
+            $env:PSModulePath = $start.EnvironmentVariables['PSModulePath']
+            $process = Start-Process -FilePath $start.FileName -ArgumentList $start.Arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        } finally { $env:PSModulePath = $modulePath }
+        try {
+            $null = $process.Handle
+            if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'Hidden test child timed out.' }
+            return [pscustomobject]@{ Code = $process.ExitCode; Text = [IO.File]::ReadAllText($stdoutPath) + [IO.File]::ReadAllText($stderrPath) }
+        } finally { $process.Dispose() }
+    }
     $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
     $process = [Diagnostics.Process]::Start($start)
     try {
@@ -63,6 +81,10 @@ try {
     Assert ((Get-OesVdaRelease ([pscustomobject]@{Build=26100;UBR=2605})) -eq '2024-12-16-windows11') '24H2 selection failed.'
     Assert (-not (Get-OesVdaRelease ([pscustomobject]@{Build=99999;UBR=0}))) 'Unknown future ABI accepted.'
     $physical = [pscustomobject]@{Name='physical';IsVdd=$false;Primary=$false}
+    $pnpVdd = [pscustomobject]@{PNPDeviceID='ROOT\DISPLAY\0000';HardwareID=@('Root\MttVDD');Service='WUDFRd'}
+    Assert (Test-OesVddDevice $pnpVdd) 'Root-enumerated UMDF VDD was not detected by its hardware ID.'
+    $otherUmdf = [pscustomobject]@{PNPDeviceID='ROOT\DISPLAY\0001';HardwareID=@('Root\OtherDisplay');Service='WUDFRd'}
+    Assert (-not (Test-OesVddDevice $otherUmdf)) 'An unrelated UMDF display was mistaken for VDD.'
     $vdd = [pscustomobject]@{Name='vdd';IsVdd=$true;Primary=$false}
     Assert-Throws { Select-OesDisplay @($physical) '' } 'No verified VDD'
     Assert ((Select-OesDisplay @($physical,$vdd) '').Name -eq 'vdd') 'VDD adapter selection failed.'
@@ -92,6 +114,8 @@ exit 0
 
     # Проверяем реальный ABI Win32 и владение процессами, без Chrome/смены дисплеев.
     Initialize-OesNative
+    Assert ([Oes.Native]::IsVddAdapter('Root\MttVDD','Virtual Display Driver')) 'VDD adapter identity was not detected.'
+    Assert (-not [Oes.Native]::IsVddAdapter('PCI\VEN_8086&DEV_46D1','Intel(R) UHD Graphics')) 'Physical GPU must remain physical even when it drives a cloned VDD target.'
     Assert ([Runtime.InteropServices.Marshal]::SizeOf([type][Oes.Mode]) -eq 220) 'DEVMODE layout is incorrect.'
     Assert ([Runtime.InteropServices.Marshal]::SizeOf([type][Oes.DisplayDevice]) -eq 840) 'DISPLAY_DEVICE layout is incorrect.'
     Assert (@([Oes.Native]::Displays()).Count -gt 0) 'Native display enumeration failed.'
@@ -102,6 +126,23 @@ exit 0
     try {
         Assert ($preview.Bitmap.Width -eq 320 -and -not $preview.Form.Visible) 'Preview resource initialization failed.'
     } finally { $preview.Form.Dispose(); $preview.Bitmap.Dispose() }
+    # Regression: a hidden console used to leave Form.Visible=true but WS_VISIBLE unset.
+    # This briefly shows our own blank preview and sends no mouse/keyboard input.
+    $previewHarness = Join-Path $scratch 'preview-visible.ps1'
+    $previewScript = @'
+$ErrorActionPreference = 'Stop'
+. '__SOURCE__'
+Initialize-OesNative
+$view = New-OesPreview ([pscustomobject]@{Mode=[pscustomobject]@{Width=320;Height=240;X=0;Y=0}})
+try {
+    [Windows.Forms.Application]::DoEvents()
+    if (-not [Oes.Native]::IsWindowVisible($view.Form.Handle)) { throw 'Native preview window is hidden.' }
+    [Console]::WriteLine('PREVIEW_VISIBLE')
+} finally { $view.Form.Dispose(); $view.Bitmap.Dispose() }
+'@
+    $previewScript.Replace('__SOURCE__', $source) | Set-Content -LiteralPath $previewHarness -Encoding UTF8
+    $visibility = Invoke-Child ('-File ' + (ConvertTo-OesArgument $previewHarness)) -HiddenWindow
+    Assert ($visibility.Code -eq 0 -and $visibility.Text -match 'PREVIEW_VISIBLE') ('Hidden-console preview regression: ' + $visibility.Text)
     $helper = Join-Path $scratch 'job-helper.ps1'
     $childPidFile = Join-Path $scratch 'child.txt'
     @'
