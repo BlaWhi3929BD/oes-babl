@@ -95,10 +95,15 @@ function Initialize-OesNative {
     Add-Type -Path (Join-Path $PSScriptRoot 'lib\OesNative.cs')
 }
 
+function Test-OesVddDevice($Device) {
+    # PnP instance is often ROOT\DISPLAY\0000, while its hardware ID identifies VDD.
+    # UMDF service WUDFRd is shared by unrelated drivers; do not identify by that service.
+    $hardwareMatch = @($Device.HardwareID | Where-Object { $_ -match '(?i)^(ROOT\\)?MttVDD$' }).Count -gt 0
+    $hardwareMatch -or $Device.PNPDeviceID -match '(?i)(^|\\)MTTVDD(\\|$)' -or $Device.Service -eq 'MttVDD'
+}
+
 function Get-OesVddDevice {
-    @(Get-CimInstance Win32_PnPEntity -Filter "PNPClass = 'Display'" | Where-Object {
-        $_.PNPDeviceID -match '(?i)(^|\\)MTTVDD(\\|$)' -or $_.Service -eq 'MttVDD'
-    })
+    @(Get-CimInstance Win32_PnPEntity -Filter "PNPClass = 'Display'" | Where-Object { Test-OesVddDevice $_ })
 }
 
 function Assert-OesVddInstalled {
@@ -145,7 +150,9 @@ function Enable-VirtualDisplay($Display, $RequestedSize) {
         $edge = $screens | Sort-Object { $_.Mode.X + $_.Mode.Width } -Descending | Select-Object -First 1
         $mode.X = $edge.Mode.X + [int]$edge.Mode.Width; $mode.Y = $edge.Mode.Y
     }
-    [Oes.Native]::ApplyMode($Display.Name, $mode, (-not $Display.Active))
+    if (-not $Display.Active -or $Display.Mode.Width -ne $RequestedSize.Width -or $Display.Mode.Height -ne $RequestedSize.Height) {
+        [Oes.Native]::ApplyMode($Display.Name, $mode, (-not $Display.Active))
+    }
     $actual = @([Oes.Native]::Displays() | Where-Object { $_.Name -eq $Display.Name -and $_.IsVdd -and $_.Active })
     if ($actual.Count -ne 1 -or $actual[0].Mode.Width -ne $RequestedSize.Width -or $actual[0].Mode.Height -ne $RequestedSize.Height) {
         throw 'VDD activation/size verification failed. Select Extend these displays in Windows Settings and retry.'
@@ -306,7 +313,10 @@ function New-OesPreview {
         }.GetNewClosure()
         $picture.Add_MouseClick($click)
         $picture.Add_MouseWheel($wheel)
-        if (-not $Hidden) { $form.Show() }
+        if (-not $Hidden) {
+            $form.Show()
+            [Oes.Native]::ShowPreview($form.Handle)
+        }
         $state
     } catch {
         $form.Dispose()
@@ -366,7 +376,7 @@ function Invoke-OesRun {
         $chrome = Find-OesChrome
         Confirm-OesChromeClosed $CloseExisting
         # Владение фиксируется до изменения / recover partial activation failure.
-        $displayChanged = $true
+        $displayChanged = -not $previousDisplay.Active -or $previousDisplay.Mode.Width -ne $dimensions.Width -or $previousDisplay.Mode.Height -ne $dimensions.Height
         $display = Enable-VirtualDisplay $previousDisplay $dimensions
         Add-Type -AssemblyName System.Windows.Forms
         $screen = @([Windows.Forms.Screen]::AllScreens | Where-Object { $_.DeviceName -eq $display.Name })
@@ -386,6 +396,12 @@ function Invoke-OesRun {
         $commandLine = ($arguments | ForEach-Object { ConvertTo-OesArgument $_ }) -join ' '
         $job = New-Object Oes.ChromeJob -ArgumentList $chrome,$commandLine
         if (-not $DisablePreview) { $preview = New-OesPreview $display }
+        if ($preview) {
+            if ($desktops) { $desktops.AttachPreview($preview.Form.Handle, $ownedDesktop) }
+            $preview.Form.Activate()
+            Write-Verbose ("Preview HWND={0}; visible={1}; managedVisible={2}" -f $preview.Form.Handle, [Oes.Native]::IsWindowVisible($preview.Form.Handle), $preview.Form.Visible)
+            if ($desktops) { Write-Verbose ("Preview desktop={0}; session desktop={1}" -f $desktops.WindowDesktop($preview.Form.Handle), $ownedDesktop) }
+        }
         Write-Host "Chrome started on VDD $($display.Name), $($dimensions.Width)x$($dimensions.Height)."
         Write-Host 'In Meet: Entire screen -> select ONLY this VDD monitor. Stop sharing before closing Chrome or switching desktops.'
         Write-Host "Temporary profile: $temporary"
