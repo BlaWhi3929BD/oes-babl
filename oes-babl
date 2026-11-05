@@ -42,6 +42,7 @@ profile_in_use() {
 select_keyboard() {
     local desktop=:${XDG_CURRENT_DESKTOP:-}:${XDG_SESSION_DESKTOP:-}:
     local config=${XDG_CONFIG_HOME:-$HOME/.config} detected_layout= detected_options= host_xkb=
+    local kde_shortcut= toggle_option=grp:alt_shift_toggle
     desktop=${desktop,,}
     case $desktop in
         *:niri:*)
@@ -55,6 +56,17 @@ select_keyboard() {
                 detected_layout=$(awk -F= '$1 == "LayoutList" { print $2; exit }' "$config/kxkbrc")
                 detected_options=$(awk -F= '$1 == "Options" { print $2; exit }' "$config/kxkbrc")
             fi
+            if [[ -r $config/kglobalshortcutsrc ]]; then
+                kde_shortcut=$(awk -F= '$1 == "Switch to Next Keyboard Layout" { print $2; exit }' "$config/kglobalshortcutsrc")
+                case ${kde_shortcut%%,*} in
+                    *Alt+Shift*|*Shift+Alt*) toggle_option=grp:alt_shift_toggle ;;
+                    *Ctrl+Shift*|*Control+Shift*|*Shift+Ctrl*|*Shift+Control*) toggle_option=grp:ctrl_shift_toggle ;;
+                    *Meta+Space*|*Win+Space*|*Space+Meta*|*Space+Win*) toggle_option=grp:win_space_toggle ;;
+                    *Alt+Space*|*Space+Alt*) toggle_option=grp:alt_space_toggle ;;
+                    *Caps*) toggle_option=grp:caps_toggle ;;
+                    *Ctrl+Alt*|*Control+Alt*|*Alt+Ctrl*|*Alt+Control*) toggle_option=grp:ctrl_alt_toggle ;;
+                esac
+            fi
             ;;
     esac
     if [[ -z $detected_layout && -z ${OES_BABL_LAYOUT:-} ]]; then
@@ -65,7 +77,10 @@ select_keyboard() {
     [[ $detected_layout =~ ^[a-zA-Z0-9_,]+$ ]] || detected_layout=us,ru
     [[ $detected_options =~ ^[a-zA-Z0-9_,:+-]*$ ]] || detected_options=
     xkb_layout=${OES_BABL_LAYOUT:-$detected_layout}
-    xkb_options=${OES_BABL_XKB_OPTIONS-${detected_options:-grp:alt_shift_toggle}}
+    if [[ $xkb_layout == *,* && $detected_options != *grp:* ]]; then
+        detected_options=${detected_options:+$detected_options,}$toggle_option
+    fi
+    xkb_options=${OES_BABL_XKB_OPTIONS-${detected_options:-$toggle_option}}
     [[ $xkb_layout =~ ^[a-zA-Z0-9_,]+$ ]] || die 'Некорректное значение OES_BABL_LAYOUT.'
     [[ $xkb_options =~ ^[a-zA-Z0-9_,:+-]*$ ]] || die 'Некорректное значение OES_BABL_XKB_OPTIONS.'
 }

@@ -74,6 +74,17 @@ select_keyboard
 [[ $xkb_layout == us,de && $xkb_options == grp:ctrl_shift_toggle ]]
 printf '%s\n' 'PASS KDE uses its own layout and options'
 
+printf '[Layout]\nLayoutList=us,ru\nOptions=scrolllock:mod3\n' > "$XDG_CONFIG_HOME/kxkbrc"
+printf '[KDE Keyboard Layout Switcher]\nSwitch to Next Keyboard Layout=Alt+Shift,Alt+Shift,Switch to Next Keyboard Layout\n' > "$XDG_CONFIG_HOME/kglobalshortcutsrc"
+select_keyboard
+[[ $xkb_layout == us,ru && $xkb_options == scrolllock:mod3,grp:alt_shift_toggle ]]
+printf '%s\n' 'PASS KDE appends kglobalshortcutsrc toggle when kxkbrc Options lacks grp:*'
+
+printf '[KDE Keyboard Layout Switcher]\nSwitch to Next Keyboard Layout=Meta+Space,Meta+Space,Switch to Next Keyboard Layout\n' > "$XDG_CONFIG_HOME/kglobalshortcutsrc"
+select_keyboard
+[[ $xkb_layout == us,ru && $xkb_options == scrolllock:mod3,grp:win_space_toggle ]]
+printf '%s\n' 'PASS KDE maps Meta+Space shortcut from kglobalshortcutsrc to grp:win_space_toggle'
+
 unset XDG_CURRENT_DESKTOP
 select_keyboard
 [[ $xkb_layout == de ]]
