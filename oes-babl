@@ -3,6 +3,96 @@ set -Eeuo pipefail
 
 die() { printf 'oes-babl: %s\n' "$*" >&2; exit 1; }
 
+valid_size() { [[ ${1:-} =~ ^[1-9][0-9]{2,4}x[1-9][0-9]{2,4}$ ]]; }
+
+detect_size() {
+    local detected=
+    # Prefer niri's physical mode: Xwayland may report a scaled logical size.
+    if command -v niri >/dev/null && command -v python3 >/dev/null; then
+        detected=$(niri msg --json focused-output 2>/dev/null | python3 -c '
+import json, sys
+try:
+    output = json.load(sys.stdin)
+    mode = output["modes"][output["current_mode"]]
+    width, height = mode["width"], mode["height"]
+    transform = output.get("logical", {}).get("transform", "Normal")
+    if transform in ("90", "270", "Flipped90", "Flipped270"):
+        width, height = height, width
+    print(f"{width}x{height}")
+except (ValueError, KeyError, TypeError, IndexError, AttributeError):
+    sys.exit(1)
+' 2>/dev/null) || detected=
+        if valid_size "$detected"; then
+            printf '%s\n' "$detected"
+            return
+        fi
+    fi
+
+    # On KDE Plasma (Wayland), query KScreen for the physical mode to avoid Xwayland scaling.
+    if command -v kscreen-doctor >/dev/null && command -v python3 >/dev/null; then
+        detected=$(kscreen-doctor -j 2>/dev/null | python3 -c '
+import json, re, sys
+try:
+    raw = re.sub(r"\x1b\[[0-9;]*m", "", sys.stdin.read())
+    data = json.loads(raw)
+    outputs = [
+        o for o in data.get("outputs", [])
+        if o.get("connected") and o.get("enabled") and o.get("currentModeId") is not None
+    ]
+    outputs.sort(key=lambda o: (0 if o.get("priority") == 1 else 1, o.get("priority") or 999))
+    output = outputs[0]
+    mode_id = str(output["currentModeId"])
+    mode = next(m for m in output.get("modes", []) if str(m.get("id")) == mode_id)
+    width, height = mode["size"]["width"], mode["size"]["height"]
+    if output.get("rotation") in (2, 8, "Left", "Right", "90", "270"):
+        width, height = height, width
+    print(f"{width}x{height}")
+except (ValueError, KeyError, TypeError, IndexError, AttributeError, StopIteration):
+    sys.exit(1)
+' 2>/dev/null) || detected=
+        if valid_size "$detected"; then
+            printf '%s\n' "$detected"
+            return
+        fi
+    fi
+
+    # On X11, choose the primary active output, or the first active output.
+    if command -v xrandr >/dev/null; then
+        detected=$(xrandr --query 2>/dev/null | awk '
+            $2 == "connected" {
+                primary = ($3 == "primary")
+                for (i = 3; i <= NF; i++) {
+                    if ($i ~ /^[0-9]+x[0-9]+[+-][0-9]+[+-][0-9]+$/) {
+                        size = $i
+                        sub(/[+-].*$/, "", size)
+                        if (!first) first = size
+                        if (primary) preferred = size
+                        break
+                    }
+                }
+            }
+            END { if (preferred) print preferred; else if (first) print first }
+        ') || detected=
+        if valid_size "$detected"; then
+            printf '%s\n' "$detected"
+            return
+        fi
+    fi
+    return 1
+}
+
+resolve_profile_root() {
+    [[ ${OES_BABL_STANDALONE:-0} =~ ^[01]$ ]] ||
+        die 'Некорректное значение OES_BABL_STANDALONE (ожидается 0 или 1).'
+    if [[ ${OES_BABL_STANDALONE:-0} == 1 ]]; then
+        profile_root=${CHROME_USER_DATA_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/oes-babl/chrome-profile}
+        mkdir -p -m 700 -- "$profile_root"
+    else
+        profile_root=${CHROME_USER_DATA_DIR:-${CHROME_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}}/google-chrome}
+        [[ -d $profile_root ]] || die "Не найден каталог существующего Chrome: $profile_root"
+    fi
+}
+
 prepare_runtime() {
     local parent=${XDG_RUNTIME_DIR:-} lock
     if [[ -n $parent && ! -L $parent && -d $parent && -O $parent &&
@@ -157,25 +247,50 @@ if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
     return 0
 fi
 
+show_help=0
+while (( $# > 0 )); do
+    case $1 in
+        --help|-h) show_help=1; shift ;;
+        --grab) OES_BABL_GRAB=1; shift ;;
+        --no-grab) OES_BABL_GRAB=0; shift ;;
+        --no-clipboard) OES_BABL_CLIPBOARD=0; shift ;;
+        --standalone) OES_BABL_STANDALONE=1; shift ;;
+        --auto-size) OES_BABL_SIZE=auto; shift ;;
+        --) shift; break ;;
+        -*) die "Неизвестный параметр: $1" ;;
+        *) break ;;
+    esac
+done
+
 saved_size=
 size_file=${XDG_CONFIG_HOME:-$HOME/.config}/oes-babl/screen-size
 if [[ -r $size_file ]]; then
     IFS= read -r saved_size < "$size_file" || true
 fi
-[[ $saved_size =~ ^[1-9][0-9]{2,4}x[1-9][0-9]{2,4}$ ]] || saved_size=1920x1080
+valid_size "$saved_size" || saved_size=1920x1080
 size=${OES_BABL_SIZE:-$saved_size}
+if [[ $size == auto ]]; then
+    size=$(detect_size || printf '%s\n' "$saved_size")
+fi
 
-if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+if (( show_help )); then
     printf '%s\n' \
-        'Использование: oes-babl [URL]' \
+        'Использование: oes-babl [ПАРАМЕТРЫ] [URL]' \
         'Открывает Chrome с обычными профилями на виртуальном экране.' \
         'Экран — на весь монитор; Chrome — с вкладками и адресной строкой.' \
         'Сайт по умолчанию: https://lms.astanait.edu.kz' \
-        'Перед запуском полностью выйдите из обычного Chrome.' \
+        'Перед запуском полностью выйдите из обычного Chrome (или используйте --standalone).' \
         "Размер экрана: $size (сохранённый при установке: $saved_size)." \
-        'Другой размер: OES_BABL_SIZE=1920x1080 oes-babl' \
-        'Раскладки клавиатуры: OES_BABL_LAYOUT=us,ru,kz oes-babl' \
-        'Профиль (необязательно): CHROME_PROFILE="Profile 1" oes-babl'
+        'Параметры:' \
+        '  --standalone     Отдельный профиль Chrome (не требует закрытия основного браузера)' \
+        '  --grab           Удерживать курсор и клавиатуру внутри Xephyr (Ctrl+Shift)' \
+        '  --no-clipboard   Отключить синхронизацию буфера обмена между хостом и Xephyr' \
+        '  --auto-size      Определить текущее разрешение монитора при запуске' \
+        '  -h, --help       Показать эту справку' \
+        'Переменные окружения:' \
+        '  Другой размер: OES_BABL_SIZE=1920x1080 (или auto) oes-babl' \
+        '  Раскладки клавиатуры: OES_BABL_LAYOUT=us,ru,kz oes-babl' \
+        '  Профиль (необязательно): CHROME_PROFILE="Profile 1" oes-babl'
     exit 0
 fi
 
@@ -186,13 +301,14 @@ browser=$(command -v google-chrome-stable || command -v google-chrome || true)
 [[ -n $browser ]] || die 'Google Chrome не найден.'
 [[ -n ${DISPLAY:-} ]] || die 'Нет DISPLAY. Для Xephyr нужен работающий Xwayland (например, встроенный в KDE/GNOME или xwayland-satellite в niri).'
 
-[[ $size =~ ^[1-9][0-9]{2,4}x[1-9][0-9]{2,4}$ ]] || die 'Размер должен иметь вид 1920x1080.'
-profile_root=${CHROME_USER_DATA_DIR:-${CHROME_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}}/google-chrome}
-[[ -d $profile_root ]] || die "Не найден каталог существующего Chrome: $profile_root"
+valid_size "$size" || die 'Размер должен иметь вид 1920x1080 (или auto).'
+[[ ${OES_BABL_GRAB:-0} =~ ^[01]$ ]] ||
+    die 'Некорректное значение OES_BABL_GRAB (ожидается 0 или 1).'
+resolve_profile_root
 
 prepare_runtime
 if profile_in_use "$profile_root"; then
-    die 'Chrome уже работает. Сохраните работу, выберите в Chrome меню ⋮ → Выход и запустите oes-babl снова.'
+    die 'Chrome уже работает. Сохраните работу, выберите в Chrome меню ⋮ → Выход (или используйте --standalone) и запустите oes-babl снова.'
 fi
 
 display_number=
@@ -226,10 +342,15 @@ select_keyboard
 touch "$auth_file"
 chmod 600 "$auth_file"
 xauth -f "$auth_file" add "$virtual_display" MIT-MAGIC-COOKIE-1 "$(mcookie)"
-Xephyr "$virtual_display" -screen "$size" -fullscreen -nolisten tcp -noreset \
-    -no-host-grab -title "oes-babl" \
-    -xkb-layout "$xkb_layout" -xkb-options "$xkb_options" \
-    -auth "$auth_file" >"$session_dir/xephyr.log" 2>&1 9>&- &
+xephyr_args=(
+    "$virtual_display" -screen "$size" -fullscreen -nolisten tcp -noreset
+    -title "oes-babl" -xkb-layout "$xkb_layout" -xkb-options "$xkb_options"
+    -auth "$auth_file"
+)
+if [[ ${OES_BABL_GRAB:-0} == 0 ]]; then
+    xephyr_args+=(-no-host-grab)
+fi
+Xephyr "${xephyr_args[@]}" >"$session_dir/xephyr.log" 2>&1 9>&- &
 xephyr_pid=$!
 
 ready=false
@@ -282,6 +403,9 @@ if (( $# == 0 )); then
     set -- https://lms.astanait.edu.kz
 fi
 printf 'oes-babl: экран %s (%s). Закройте Chrome, чтобы завершить.\n' "$virtual_display" "$size"
+if [[ ${OES_BABL_GRAB:-0} == 1 ]]; then
+    printf '%s\n' 'Режим захвата ввода включён (переключение курсора и клавиатуры: Ctrl+Shift).'
+fi
 printf '%s\n' 'Перед записью всего экрана проверьте предпросмотр на сайте.'
 env -u WAYLAND_DISPLAY DISPLAY="$virtual_display" XAUTHORITY="$auth_file" \
     XDG_SESSION_TYPE=x11 "$browser" "${chrome_args[@]}" "$@" 9>&- &

@@ -145,3 +145,17 @@ if (OES_BABL_CLIPBOARD=invalid start_clipboard_bridge :0 :99 "$test_dir/nonexist
     printf '%s\n' 'FAIL invalid OES_BABL_CLIPBOARD accepted' >&2; exit 1
 fi
 printf '%s\n' 'PASS invalid OES_BABL_CLIPBOARD rejected'
+
+OES_BABL_STANDALONE=1 resolve_profile_root
+[[ $profile_root == "$XDG_CONFIG_HOME/oes-babl/chrome-profile" && -d $profile_root && $(stat -c '%a' "$profile_root") == 700 ]]
+printf '%s\n' 'PASS standalone mode creates isolated 0700 Chrome profile directory'
+
+if (OES_BABL_STANDALONE=invalid resolve_profile_root) 2>/dev/null; then
+    printf '%s\n' 'FAIL invalid OES_BABL_STANDALONE accepted' >&2; exit 1
+fi
+printf '%s\n' 'PASS invalid OES_BABL_STANDALONE rejected'
+
+if ("$source_dir/oes-babl" --unknown-flag) 2>/dev/null; then
+    printf '%s\n' 'FAIL unknown CLI option accepted' >&2; exit 1
+fi
+printf '%s\n' 'PASS unknown CLI option rejected'
