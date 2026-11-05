@@ -150,6 +150,14 @@ OES_BABL_STANDALONE=1 resolve_profile_root
 [[ $profile_root == "$XDG_CONFIG_HOME/oes-babl/chrome-profile" && -d $profile_root && $(stat -c '%a' "$profile_root") == 700 ]]
 printf '%s\n' 'PASS standalone mode creates isolated 0700 Chrome profile directory'
 
+rm -rf "$XDG_CONFIG_HOME/oes-babl/chrome-profile"
+ln -s "$test_dir/victim" "$XDG_CONFIG_HOME/oes-babl/chrome-profile"
+if (OES_BABL_STANDALONE=1 resolve_profile_root) 2>/dev/null; then
+    printf '%s\n' 'FAIL standalone profile symlink accepted' >&2; exit 1
+fi
+rm "$XDG_CONFIG_HOME/oes-babl/chrome-profile"
+printf '%s\n' 'PASS standalone profile symlink rejected'
+
 if (OES_BABL_STANDALONE=invalid resolve_profile_root) 2>/dev/null; then
     printf '%s\n' 'FAIL invalid OES_BABL_STANDALONE accepted' >&2; exit 1
 fi

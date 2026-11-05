@@ -37,7 +37,8 @@ fi
 if command -v fish >/dev/null; then
     fish_config=${XDG_CONFIG_HOME:-$HOME/.config}/fish
     install -Dm644 "$source_dir/fish/oes-babl.fish" "$fish_config/functions/oes-babl.fish"
-    printf '%s\n' 'Команда oes-babl доступна в fish без перезапуска терминала.'
+    install -Dm644 "$source_dir/fish/completions/oes-babl.fish" "$fish_config/completions/oes-babl.fish"
+    printf '%s\n' 'Команда oes-babl и автодополнение доступны в fish без перезапуска терминала.'
 else
     printf '%s\n' 'Для запуска используйте ~/.local/bin/oes-babl или добавьте ~/.local/bin в PATH.'
 fi

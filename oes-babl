@@ -87,6 +87,8 @@ resolve_profile_root() {
     if [[ ${OES_BABL_STANDALONE:-0} == 1 ]]; then
         profile_root=${CHROME_USER_DATA_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/oes-babl/chrome-profile}
         mkdir -p -m 700 -- "$profile_root"
+        [[ ! -L $profile_root && -d $profile_root && -O $profile_root ]] ||
+            die "Небезопасный каталог автономного профиля: $profile_root"
     else
         profile_root=${CHROME_USER_DATA_DIR:-${CHROME_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}}/google-chrome}
         [[ -d $profile_root ]] || die "Не найден каталог существующего Chrome: $profile_root"
@@ -222,13 +224,16 @@ if host_disp is None:
 
 cb_host = Gtk.Clipboard.get_for_display(host_disp, Gdk.SELECTION_CLIPBOARD)
 cb_guest = Gtk.Clipboard.get_for_display(guest_disp, Gdk.SELECTION_CLIPBOARD)
-last = {"text": None}
 
-def on_text(_cb, text, dst_cb):
-    if text and text != last["text"]:
-        last["text"] = text
-        dst_cb.set_text(text, -1)
+def apply_if_changed(_dst_cb, cur_text, payload):
+    dst_cb, new_text = payload
+    if cur_text != new_text:
+        dst_cb.set_text(new_text, -1)
         dst_cb.store()
+
+def on_text(_src_cb, text, dst_cb):
+    if text:
+        dst_cb.request_text(apply_if_changed, (dst_cb, text))
 
 def on_owner_change(src_cb, _event, dst_cb):
     src_cb.request_text(on_text, dst_cb)
