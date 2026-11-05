@@ -136,3 +136,12 @@ wait "$child_pid" 2>/dev/null || true
 ! kill -0 "$child_pid" 2>/dev/null
 child_pid=
 printf '%s\n' 'PASS process ignoring TERM is stopped after the grace period'
+
+OES_BABL_CLIPBOARD=0 start_clipboard_bridge :0 :99 "$test_dir/nonexistent" "$test_dir/clipboard.log"
+[[ -z $clipboard_pid ]]
+printf '%s\n' 'PASS clipboard bridge skipped when OES_BABL_CLIPBOARD=0'
+
+if (OES_BABL_CLIPBOARD=invalid start_clipboard_bridge :0 :99 "$test_dir/nonexistent" "$test_dir/clipboard.log") 2>/dev/null; then
+    printf '%s\n' 'FAIL invalid OES_BABL_CLIPBOARD accepted' >&2; exit 1
+fi
+printf '%s\n' 'PASS invalid OES_BABL_CLIPBOARD rejected'
